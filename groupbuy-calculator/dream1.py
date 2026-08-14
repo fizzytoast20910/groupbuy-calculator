@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from io import BytesIO
 
 # ------------------------------------------------
 # 페이지 설정
@@ -9,7 +10,6 @@ st.set_page_config(
     page_icon="🧾",
     layout="wide"
 )
-
 
 # ------------------------------------------------
 # 커스텀 스타일
@@ -58,7 +58,6 @@ st.markdown(
         margin-bottom: 0.75rem;
     }
 
-    /* 전체 요약 카드 */
     div[data-testid="stMetric"] {
         background: white;
         border: 1px solid #e5e7eb;
@@ -84,6 +83,7 @@ st.markdown(
         border-radius: 18px;
         overflow: hidden;
         border: 1px solid #e5e7eb;
+        box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
     }
 
     .stDownloadButton button {
@@ -102,73 +102,81 @@ st.markdown(
     }
 </style>
 """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
+
+# ------------------------------------------------
+# 상수
+# ------------------------------------------------
+REQUIRED_COLUMNS = ["구매자", "구매 개수", "개인 상품금액"]
+MAX_QUANTITY = 1_000_000_000
+
+
+# ------------------------------------------------
+# 데이터 정리 함수
+# ------------------------------------------------
+def normalize_dataframe(dataframe):
+    """직접 입력과 Excel 입력 데이터를 같은 형식으로 정리."""
+    df = dataframe.copy()
+
+    # 필요한 열만 사용
+    df = df[REQUIRED_COLUMNS].copy()
+
+    # 구매자 이름 정리
+    df["구매자"] = df["구매자"].fillna("").astype(str).str.strip()
+
+    empty_names = df["구매자"] == ""
+    if empty_names.any():
+        df.loc[empty_names, "구매자"] = [
+            f"구매자 {i + 1}"
+            for i in range(empty_names.sum())
+        ]
+
+    # 구매 개수 정리
+    df["구매 개수"] = pd.to_numeric(
+        df["구매 개수"],
+        errors="coerce"
+    ).fillna(1)
+
+    df.loc[df["구매 개수"] < 1, "구매 개수"] = 1
+    df["구매 개수"] = df["구매 개수"].astype(int)
+
+    # 개인 상품금액 정리
+    df["개인 상품금액"] = pd.to_numeric(
+        df["개인 상품금액"],
+        errors="coerce"
+    ).fillna(0)
+
+    df.loc[df["개인 상품금액"] < 0, "개인 상품금액"] = 0
+
+    return df
 
 
 # ------------------------------------------------
 # 경고 팝업 함수
 # ------------------------------------------------
-def show_quantity_warning(too_large_df):
-    """구매 개수가 10억 이상일 때 표시하는 팝업"""
-    st.markdown(
-        """
-        <div style="
-            background-color:#fff7ed;
-            border:1px solid #fed7aa;
-            border-radius:14px;
-            padding:10px 14px;
-            margin-bottom:10px;
-        ">
-            <h3 style="color:#c2410c; margin:0;">
-                ⚠️ 구매 개수 입력 오류
-            </h3>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+def quantity_warning_dialog(too_large_df):
+    """10억 이상 구매 개수 입력 시 표시."""
+    st.markdown("### ⚠️ 구매 개수 입력 오류")
 
     st.error(
         "구매 개수가 10억 개 이상으로 입력되었습니다.\n\n"
-        "현실적으로 사용할 수 있는 범위를 초과한 값이므로 "
+        "현실적인 범위를 초과하는 값이므로 "
         "구매 개수를 수정해주세요."
     )
 
     st.write("문제가 있는 구매자:")
 
-    warning_df = too_large_df[
-        ["구매자", "구매 개수"]
-    ].copy()
-
     st.dataframe(
-        warning_df,
+        too_large_df[["구매자", "구매 개수"]],
         use_container_width=True,
-        hide_index=True
-    )
-
-    st.warning(
-        "구매 개수를 수정한 뒤 다시 계산해주세요."
+        hide_index=True,
     )
 
 
-def show_discount_warning(total_discount, max_possible_discount):
-    """할인금액이 전체 지출 가능 금액보다 클 때 표시하는 팝업"""
-    st.markdown(
-        """
-        <div style="
-            background-color:#fef2f2;
-            border:1px solid #fecaca;
-            border-radius:14px;
-            padding:10px 14px;
-            margin-bottom:10px;
-        ">
-            <h3 style="color:#b91c1c; margin:0;">
-                ❌ 할인금액 입력 오류
-            </h3>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+def discount_warning_dialog(total_discount, max_possible_discount):
+    """전체 할인금액이 과도한 경우 표시."""
+    st.markdown("### ❌ 할인금액 입력 오류")
 
     st.error(
         f"전체 할인금액은 {total_discount:,.0f}원입니다.\n\n"
@@ -179,31 +187,14 @@ def show_discount_warning(total_discount, max_possible_discount):
     )
 
 
-def show_negative_warning(negative_df):
-    """개인별 최종 부담금이 음수일 때 표시하는 팝업"""
-    st.markdown(
-        """
-        <div style="
-            background-color:#fef2f2;
-            border:1px solid #fecaca;
-            border-radius:14px;
-            padding:10px 14px;
-            margin-bottom:10px;
-        ">
-            <h3 style="color:#b91c1c; margin:0;">
-                ❌ 정산 금액 오류
-            </h3>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+def negative_warning_dialog(negative_df):
+    """개인별 최종 부담금이 음수인 경우 표시."""
+    st.markdown("### ❌ 정산 금액 오류")
 
     st.error(
         "일부 구매자의 최종 부담금이 0원보다 작습니다.\n\n"
         "할인금액이나 구매 개수를 확인해주세요."
     )
-
-    st.write("문제가 있는 구매자:")
 
     warning_df = negative_df[
         ["구매자", "구매 개수", "최종 부담금"]
@@ -216,7 +207,7 @@ def show_negative_warning(negative_df):
     st.dataframe(
         warning_df,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
 
 
@@ -233,7 +224,7 @@ st.markdown(
     </p>
 </div>
 """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
@@ -243,174 +234,264 @@ st.markdown(
 left, right = st.columns([1, 2], gap="large")
 
 
+# ------------------------------------------------
+# 왼쪽: 물품 정보
+# ------------------------------------------------
 with left:
     st.markdown(
         "<div class='section-card'><div class='section-title'>⚙️ 물품 정보</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
-    # 배송비
     shipping_cost = st.number_input(
         "배송비 (원)",
         min_value=0,
         value=3000,
-        step=100
+        step=100,
     )
 
-    # 기타 공동비용
     other_cost = st.number_input(
         "기타 공동비용 (원)",
         min_value=0,
         value=0,
-        step=100
+        step=100,
     )
 
-    # 전체 할인금액
     total_discount = st.number_input(
         "전체 할인금액 (원)",
         min_value=0,
         value=0,
-        step=100
+        step=100,
     )
 
-    # 공동비용 분배 방법
-    distribution_method = st.radio(
+    distribution_method = st.selectbox(
         "공동비용 분배 방법",
-        ["균등 분배", "구매 금액 비례"],
-        horizontal=True
+        [
+            "균등 분배",
+            "구매 개수 비례",
+            "구매 금액 비례",
+        ],
     )
 
     st.caption(
-        "균등 분배는 모든 참여자가 같은 금액을 부담하고, "
-        "구매 금액 비례는 개인 상품금액의 비율에 따라 공동비용을 분담합니다."
+        "균등 분배는 모든 참여자가 같은 금액을 부담합니다. "
+        "구매 개수 비례는 구매 수량 비율로, "
+        "구매 금액 비례는 개인 상품금액 비율로 공동비용을 분담합니다."
     )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+# ------------------------------------------------
+# 오른쪽: 구매자 입력
+# ------------------------------------------------
 with right:
     st.markdown(
         "<div class='section-card'><div class='section-title'>👥 구매자 입력</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
-    # 구매 인원 수
-    people_count = st.slider(
-        "구매 인원 수",
-        min_value=1,
-        max_value=50,
-        value=5
+    # 처음에는 직접 입력이 기본값
+    input_method = st.radio(
+        "입력 방법",
+        ["직접 입력", "파일 입력"],
+        horizontal=True,
+        index=0,
     )
 
-    # 기본 구매자 데이터
-    default_df = pd.DataFrame({
-        "구매자": [f"구매자 {i + 1}" for i in range(people_count)],
-        "구매 개수": [1 for _ in range(people_count)],
-        "개인 상품금액": [0 for _ in range(people_count)]
-    })
+    # --------------------------------------------
+    # 직접 입력
+    # --------------------------------------------
+    if input_method == "직접 입력":
 
-    # 구매자별 정보 입력
-    df = st.data_editor(
-        default_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "구매자": st.column_config.TextColumn(
-                "구매자 이름",
-                required=True
-            ),
-            "구매 개수": st.column_config.NumberColumn(
-                "구매 개수",
-                min_value=1,
-                max_value=10000,
-                step=1,
-                required=True
-            ),
-            "개인 상품금액": st.column_config.NumberColumn(
-                "개인 상품금액 (원)",
-                min_value=0,
-                step=100,
-                required=True
+        people_count = st.slider(
+            "구매 인원 수",
+            min_value=1,
+            max_value=50,
+            value=5,
+        )
+
+        default_df = pd.DataFrame({
+            "구매자": [
+                f"구매자 {i + 1}"
+                for i in range(people_count)
+            ],
+            "구매 개수": [1] * people_count,
+            "개인 상품금액": [0] * people_count,
+        })
+
+        df = st.data_editor(
+            default_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "구매자": st.column_config.TextColumn(
+                    "구매자 이름",
+                    required=True,
+                ),
+                "구매 개수": st.column_config.NumberColumn(
+                    "구매 개수",
+                    min_value=1,
+                    step=1,
+                    required=True,
+                ),
+                "개인 상품금액": st.column_config.NumberColumn(
+                    "개인 상품금액 (원)",
+                    min_value=0,
+                    step=100,
+                    required=True,
+                ),
+            },
+            key="direct_input_table",
+        )
+
+        df = normalize_dataframe(df)
+
+    # --------------------------------------------
+    # 파일 입력
+    # --------------------------------------------
+    else:
+
+        st.info(
+            "Excel 파일의 첫 번째 시트에서 아래 3개 열을 읽습니다: "
+            "구매자 / 구매 개수 / 개인 상품금액"
+        )
+
+        uploaded_file = st.file_uploader(
+            "Excel 파일 업로드",
+            type=["xlsx", "xls"],
+            help="지원 형식: .xlsx, .xls",
+            key="buyer_excel_upload",
+        )
+
+        # 파일을 아직 업로드하지 않은 경우
+        if uploaded_file is None:
+            st.info(
+                "Excel 파일을 업로드하면 구매자 입력표가 "
+                "파일의 내용으로 교체됩니다."
             )
-        }
-    )
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.stop()
+
+        # Excel 파일 읽기
+        try:
+            df = pd.read_excel(uploaded_file)
+
+        except ImportError:
+            st.error(
+                "Excel 파일을 읽기 위한 라이브러리가 없습니다. "
+                "requirements.txt에 openpyxl과 xlrd를 추가해주세요."
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.stop()
+
+        except Exception as error:
+            st.error(
+                f"Excel 파일을 읽는 중 오류가 발생했습니다.\n\n{error}"
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.stop()
+
+        # 필수 열 검사
+        missing_columns = [
+            column
+            for column in REQUIRED_COLUMNS
+            if column not in df.columns
+        ]
+
+        if missing_columns:
+            st.error(
+                "Excel 파일에 필요한 열이 없습니다: "
+                + ", ".join(missing_columns)
+            )
+
+            st.caption(
+                "필수 열: 구매자 / 구매 개수 / 개인 상품금액"
+            )
+
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.stop()
+
+        # 필요한 열만 가져오기
+        df = normalize_dataframe(df)
+
+        # 빈 파일 검사
+        if df.empty:
+            st.error(
+                "Excel 파일에 구매자 데이터가 없습니다."
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.stop()
+
+        st.success(
+            f"Excel 파일에서 {len(df)}명의 구매자 정보를 불러왔습니다."
+        )
+
+        # 불러온 데이터 미리보기
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+        )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ------------------------------------------------
-# 기본 입력값 검증
+# 기본 검증
 # ------------------------------------------------
-
-# 구매 개수 숫자 변환
-try:
-    df["구매 개수"] = pd.to_numeric(
-        df["구매 개수"],
-        errors="coerce"
-    ).fillna(1)
-
-    # 1개 미만이면 1개로 처리
-    df.loc[df["구매 개수"] < 1, "구매 개수"] = 1
-    df["구매 개수"] = df["구매 개수"].astype(int)
-
-    # 개인 상품금액 숫자 변환
-    df["개인 상품금액"] = pd.to_numeric(
-        df["개인 상품금액"],
-        errors="coerce"
-    ).fillna(0)
-
-    # 음수 금액 방지
-    df.loc[df["개인 상품금액"] < 0, "개인 상품금액"] = 0
-
-except Exception:
-    st.error("입력값을 확인하는 과정에서 문제가 발생했습니다.")
+if df.empty:
+    st.error("구매자 데이터가 없습니다.")
     st.stop()
 
-
-# ------------------------------------------------
-# 기본 정보 계산
-# ------------------------------------------------
-total_people = len(df)
-total_quantity = int(df["구매 개수"].sum())
-total_product_cost = float(df["개인 상품금액"].sum())
-
-# 배송비 + 기타 공동비용
-total_common_cost = shipping_cost + other_cost
-
-
-# ------------------------------------------------
-# 구매 개수 10억 이상 검증
-# ------------------------------------------------
-MAX_QUANTITY = 1_000_000_000
-
-too_large = df[df["구매 개수"] >= MAX_QUANTITY]
+# 10억 이상 구매 개수 검사
+too_large = df[
+    df["구매 개수"] >= MAX_QUANTITY
+]
 
 if not too_large.empty:
 
     @st.dialog("⚠️ 구매 개수 입력 경고")
-    def quantity_warning_dialog():
-        show_quantity_warning(too_large)
+    def open_quantity_warning():
+        quantity_warning_dialog(too_large)
 
-    quantity_warning_dialog()
+    open_quantity_warning()
     st.stop()
+
+
+# ------------------------------------------------
+# 전체 정보 계산
+# ------------------------------------------------
+total_people = len(df)
+total_quantity = int(df["구매 개수"].sum())
+total_product_cost = float(
+    df["개인 상품금액"].sum()
+)
+
+total_common_cost = float(
+    shipping_cost + other_cost
+)
+
+# 할인 적용 전 총 지출 가능 금액
+max_possible_discount = (
+    total_product_cost
+    + total_common_cost
+)
 
 
 # ------------------------------------------------
 # 할인금액 검증
 # ------------------------------------------------
-# 할인 적용 전 총 지출 가능 금액
-max_possible_discount = total_product_cost + total_common_cost
-
 if total_discount > max_possible_discount:
 
     @st.dialog("❌ 할인금액 입력 경고")
-    def discount_warning_dialog():
-        show_discount_warning(
+    def open_discount_warning():
+        discount_warning_dialog(
             total_discount,
-            max_possible_discount
+            max_possible_discount,
         )
 
-    discount_warning_dialog()
+    open_discount_warning()
     st.stop()
 
 
@@ -419,48 +500,75 @@ if total_discount > max_possible_discount:
 # ------------------------------------------------
 if distribution_method == "균등 분배":
 
-    # 모든 참여자가 동일한 금액을 부담
+    # 모든 참여자에게 동일하게 분배
     df["공동비용 부담"] = (
-        total_common_cost / total_people
+        total_common_cost
+        / total_people
+    )
+
+elif distribution_method == "구매 개수 비례":
+
+    # 구매 개수 비율에 따라 분배
+    if total_quantity <= 0:
+        st.error("총 구매 개수가 0개입니다.")
+        st.stop()
+
+    df["공동비용 부담"] = (
+        total_common_cost
+        * df["구매 개수"]
+        / total_quantity
     )
 
 else:
 
-    # 개인 상품금액 비율에 따라 공동비용을 분배
+    # 구매 금액 비율에 따라 분배
     if total_product_cost > 0:
+
         df["공동비용 부담"] = (
             total_common_cost
             * df["개인 상품금액"]
             / total_product_cost
         )
+
     else:
-        # 상품금액이 모두 0원이라면 균등 분배
-        df["공동비용 부담"] = (
-            total_common_cost / total_people
-        )
+
+        # 모든 상품금액이 0원이면 금액 비례 계산 불가
+        if total_common_cost > 0:
+            st.error(
+                "구매 금액 비례 방식은 "
+                "개인 상품금액이 0원일 때 사용할 수 없습니다."
+            )
+            st.stop()
+
+        df["공동비용 부담"] = 0.0
 
 
 # ------------------------------------------------
 # 할인금액 계산
 # ------------------------------------------------
-# 개인 상품금액 비율에 따라 전체 할인금액을 배분
 if total_product_cost > 0:
+
+    # 개인 상품금액 비율로 할인금액 배분
     df["할인 배분"] = (
         total_discount
         * df["개인 상품금액"]
         / total_product_cost
     )
+
 else:
-    # 상품금액이 모두 0원이면 할인금액도 배분할 기준이 없으므로 오류 처리
+
+    # 상품금액 합계가 0인데 할인금액이 있다면 계산 불가
     if total_discount > 0:
+
         @st.dialog("❌ 할인금액 입력 경고")
-        def zero_product_discount_dialog():
+        def open_zero_product_discount_warning():
             st.error(
-                "개인 상품금액의 합계가 0원인데 전체 할인금액이 입력되었습니다.\n\n"
-                "개인 상품금액을 먼저 입력하거나 할인금액을 0원으로 설정해주세요."
+                "개인 상품금액의 합계가 0원인데 "
+                "전체 할인금액이 입력되었습니다.\n\n"
+                "개인 상품금액을 입력하거나 할인금액을 0원으로 설정해주세요."
             )
 
-        zero_product_discount_dialog()
+        open_zero_product_discount_warning()
         st.stop()
 
     df["할인 배분"] = 0.0
@@ -477,17 +585,19 @@ df["최종 부담금"] = (
 
 
 # ------------------------------------------------
-# 개인별 최종 부담금 음수 검증
+# 음수 부담금 검증
 # ------------------------------------------------
-negative_df = df[df["최종 부담금"] < 0]
+negative_df = df[
+    df["최종 부담금"] < 0
+]
 
 if not negative_df.empty:
 
     @st.dialog("❌ 정산 금액 오류")
-    def negative_warning_dialog():
-        show_negative_warning(negative_df)
+    def open_negative_warning():
+        negative_warning_dialog(negative_df)
 
-    negative_warning_dialog()
+    open_negative_warning()
     st.stop()
 
 
@@ -503,7 +613,7 @@ total_final_cost = (
 
 
 # ------------------------------------------------
-# 소수점 차이 보정
+# 소수점 오차 보정
 # ------------------------------------------------
 difference = (
     total_final_cost
@@ -512,8 +622,11 @@ difference = (
 
 if abs(difference) > 0.0001:
 
-    # 계산 과정에서 발생하는 소수점 차이를 마지막 구매자에게 조정
-    df.loc[df.index[-1], "최종 부담금"] += difference
+    # 원 단위 반올림 과정에서 발생할 수 있는 오차 보정
+    df.loc[
+        df.index[-1],
+        "최종 부담금"
+    ] += difference
 
 
 # ------------------------------------------------
@@ -521,47 +634,45 @@ if abs(difference) > 0.0001:
 # ------------------------------------------------
 st.markdown("### 📊 전체 요약")
 
-# 첫 번째 줄
 col1, col2, col3 = st.columns(3)
 
 with col1:
     st.metric(
-        label="총 구매 인원",
-        value=f"{total_people:,}명"
+        "총 구매 인원",
+        f"{total_people:,}명"
     )
 
 with col2:
     st.metric(
-        label="총 구매 개수",
-        value=f"{total_quantity:,}개"
+        "총 구매 개수",
+        f"{total_quantity:,}개"
     )
 
 with col3:
     st.metric(
-        label="최종 지출금액",
-        value=f"{total_final_cost:,.0f}원"
+        "최종 지출금액",
+        f"{total_final_cost:,.0f}원"
     )
 
 
-# 두 번째 줄
 col4, col5, col6 = st.columns(3)
 
 with col4:
     st.metric(
-        label="상품 총액",
-        value=f"{total_product_cost:,.0f}원"
+        "상품 총액",
+        f"{total_product_cost:,.0f}원"
     )
 
 with col5:
     st.metric(
-        label="공동비용",
-        value=f"{total_common_cost:,.0f}원"
+        "공동비용",
+        f"{total_common_cost:,.0f}원"
     )
 
 with col6:
     st.metric(
-        label="전체 할인금액",
-        value=f"{total_discount:,.0f}원"
+        "전체 할인금액",
+        f"{total_discount:,.0f}원"
     )
 
 
@@ -572,17 +683,15 @@ st.markdown("### 💰 개인별 정산 결과")
 
 display_df = df.copy()
 
-# 금액을 보기 좋은 문자열로 변환
 for col in [
     "개인 상품금액",
     "공동비용 부담",
     "할인 배분",
-    "최종 부담금"
+    "최종 부담금",
 ]:
     display_df[col] = display_df[col].map(
-        lambda x: f"{x:,.0f}원"
+        lambda value: f"{value:,.0f}원"
     )
-
 
 st.dataframe(
     display_df[
@@ -592,28 +701,31 @@ st.dataframe(
             "개인 상품금액",
             "공동비용 부담",
             "할인 배분",
-            "최종 부담금"
+            "최종 부담금",
         ]
     ],
     use_container_width=True,
-    hide_index=True
+    hide_index=True,
 )
 
 
 # ------------------------------------------------
-# 전체 금액 검증
+# 전체 금액 무결성 검증
 # ------------------------------------------------
 final_sum = df["최종 부담금"].sum()
 
 if abs(final_sum - total_final_cost) < 0.01:
+
     st.success(
         "✅ 개인별 최종 부담금의 합계가 "
         "전체 최종 지출금액과 정확하게 일치합니다."
     )
+
 else:
+
     st.error(
-        "❌ 개인별 금액의 합계와 전체 지출금액이 "
-        "일치하지 않습니다."
+        "❌ 개인별 금액의 합계와 "
+        "전체 지출금액이 일치하지 않습니다."
     )
 
 
@@ -627,20 +739,49 @@ csv_df = df[
         "개인 상품금액",
         "공동비용 부담",
         "할인 배분",
-        "최종 부담금"
+        "최종 부담금",
     ]
 ].copy()
 
-csv = csv_df.to_csv(
+# UTF-8 BOM을 포함한 bytes로 변환
+# Windows Excel에서 한글이 깨지는 문제를 방지
+csv_bytes = csv_df.to_csv(
     index=False,
-    encoding="utf-8-sig"
-)
+    encoding="utf-8-sig",
+).encode("utf-8-sig")
 
 st.download_button(
     "📥 정산 결과 CSV 다운로드",
-    data=csv,
+    data=csv_bytes,
     file_name="공동구매_정산결과.csv",
-    mime="text/csv"
+    mime="text/csv; charset=utf-8",
+)
+
+
+# ------------------------------------------------
+# Excel 다운로드
+# ------------------------------------------------
+excel_buffer = BytesIO()
+
+with pd.ExcelWriter(
+    excel_buffer,
+    engine="openpyxl"
+) as writer:
+
+    csv_df.to_excel(
+        writer,
+        index=False,
+        sheet_name="정산결과",
+    )
+
+st.download_button(
+    "📊 정산 결과 Excel 다운로드",
+    data=excel_buffer.getvalue(),
+    file_name="공동구매_정산결과.xlsx",
+    mime=(
+        "application/vnd.openxmlformats-officedocument."
+        "spreadsheetml.sheet"
+    ),
 )
 
 
